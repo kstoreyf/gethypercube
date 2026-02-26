@@ -1,4 +1,5 @@
 """Main entry point: maximinSLHD."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
@@ -19,8 +20,9 @@ class SLHDResult:
         the slice label (1..t) and the remaining k columns are the design
         variables.
     std_design : np.ndarray, same shape as design
-        Design standardized to (0, 1) using (rank - 0.5) / n.
-        The slice column (if present) is carried through unchanged.
+        Design standardized to (0, 1) via (rank - 0.5) / n. With the paper's
+        slice-wise construction, each slice already spans 1..n, so global
+        ranking yields each slice spanning [0, 1]^k. Slice column unchanged.
     measure : float
         Final phi value (average reciprocal distance). Lower = better.
     temp0 : float
@@ -42,10 +44,25 @@ class SLHDResult:
     n_dims: int
 
 
-def _standardize(D: np.ndarray, n: int) -> np.ndarray:
-    """Standardize each column to (0, 1) via (rank - 0.5) / n."""
+def _standardize(
+    D: np.ndarray, n: int, scramble: bool = True, rng: np.random.Generator | None = None
+) -> np.ndarray:
+    """
+    Standardize each column to (0, 1).
+
+    When scramble=False, center points within their grid cells: (rank - 0.5) / n.
+    When scramble=True, randomly place points within their cells (like SciPy LHS).
+    """
+    Df = D.astype(float)
+    if scramble and rng is not None:
+        result = np.empty_like(Df)
+        for j in range(D.shape[1]):
+            ranks = rankdata(Df[:, j])
+            u = rng.uniform(0, 1, size=len(ranks))
+            result[:, j] = (ranks - 1 + u) / n
+        return result
     return np.apply_along_axis(
-        lambda col: (rankdata(col) - 0.5) / n, axis=0, arr=D.astype(float)
+        lambda col: (rankdata(col) - 0.5) / n, axis=0, arr=Df
     )
 
 
@@ -58,6 +75,7 @@ def maximinSLHD(
     itermax: int = 100,
     total_iter: int = 1_000_000,
     random_state: int | None = None,
+    scramble: bool = True,
 ) -> SLHDResult:
     """
     Generate a maximin-distance Sliced Latin Hypercube Design (SLHD).
@@ -85,26 +103,16 @@ def maximinSLHD(
         Hard cap on total SA iterations across the full run.
     random_state : int or None, optional
         Seed for reproducibility.
+    scramble : bool, optional
+        When True (default), randomly place points within their grid cells
+        (like scipy.stats.qmc.LatinHypercube). When False, center points
+        within cells: (rank - 0.5) / n.
 
     Returns
     -------
     SLHDResult
         Dataclass containing the design, standardized design, phi measure,
         initial temperature, and design parameters.
-
-    Examples
-    --------
-    Standard maximin LHD (t=1):
-
-    >>> result = maximinSLHD(t=1, m=10, k=3, random_state=42)
-    >>> result.design.shape
-    (10, 3)
-
-    Sliced LHD with 3 slices of 4 points each:
-
-    >>> result = maximinSLHD(t=3, m=4, k=2, random_state=42)
-    >>> result.design.shape  # first col is slice label
-    (12, 3)
     """
     if t < 1 or m < 2 or k < 1:
         raise ValueError("Require t >= 1, m >= 2, k >= 1")
@@ -131,14 +139,20 @@ def maximinSLHD(
     assert best_D is not None
     n = m * t
 
+    std_rng = None
+    if scramble:
+        std_rng = np.random.default_rng(
+            random_state if random_state is not None else None
+        )
+
     if t > 1:
         slice_col = np.repeat(np.arange(1, t + 1), m).reshape(-1, 1)
         design_out = np.hstack([slice_col, best_D])
-        std_vars = _standardize(best_D, n)
+        std_vars = _standardize(best_D, n, scramble=scramble, rng=std_rng)
         std_out = np.hstack([slice_col, std_vars])
     else:
         design_out = best_D
-        std_out = _standardize(best_D, n)
+        std_out = _standardize(best_D, n, scramble=scramble, rng=std_rng)
 
     return SLHDResult(
         design=design_out,
@@ -149,3 +163,4 @@ def maximinSLHD(
         n_per_slice=m,
         n_dims=k,
     )
+

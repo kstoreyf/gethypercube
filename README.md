@@ -1,52 +1,68 @@
-# slhd
+# gethypercube
 
-**Maximin-distance Sliced Latin Hypercube Designs in Python.**
+**Sliced and nested Latin hypercube designs in Python.**
 
-A Python reimplementation of the R package [`SLHD`](https://cran.r-project.org/package=SLHD) (Ba, Brenneman & Myers, 2015).
+- **Sliced LHD** (`gethypercube.sliced_lhd`): maximin-distance Sliced Latin Hypercube Designs (Ba, Brenneman & Myers, 2015). When `t=1`, standard maximin LHD.
+- **Nested LHD** (`gethypercube.nested_lhd`): Qian (2009) algebraic nested LHD and Rennen et al. (2010) nested maximin LHD.
 
 ## Overview
 
-A **Sliced Latin Hypercube Design (SLHD)** is a space-filling design of experiments where:
+A **Sliced Latin Hypercube Design (SLHD)** has `n = m × t` points, is a valid LHD overall, and partitions into `t` slices of `m` points each where every slice is also a valid LHD—useful for experiments with qualitative and quantitative factors.
 
-- The full design of `n = m × t` points is a valid Latin Hypercube Design (LHD)
-- It can be partitioned into `t` **slices** of `m` points each, where every slice is also a valid LHD
-
-This is useful for computer experiments with a mix of quantitative and qualitative factors. Each slice provides space-filling coverage for one level of the qualitative factor.
-
-When `t=1`, the result is a standard maximin-distance LHD.
+**Nested LHDs** provide multiple layers of sizes `n_1 < n_2 < ...` where each layer is a valid LHD and smaller sets are subsets of larger ones (`nested_lhd` for Qian divisibility, `nested_maximin_lhd` for Rennen/ESE-optimised).
 
 ## Installation
 
 ```bash
-pip install slicedlhd
+pip install gethypercube
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/your-org/slhd
-cd slhd
+git clone https://github.com/your-org/gethypercube
+cd gethypercube
 pip install -e ".[dev]"
 ```
 
 ## Quick Start
 
+**Sliced LHD (maximin SLHD):**
+
 ```python
-from slicedlhd import maximinSLHD
+from gethypercube import maximinSLHD
 
 # Standard maximin LHD (t=1)
 result = maximinSLHD(t=1, m=10, k=3, random_state=42)
 print(result.design)        # integer design, shape (10, 3)
-print(result.std_design)    # standardized to (0, 1), shape (10, 3)
+print(result.std_design)    # standardized to (0, 1)
 print(result.measure)       # phi value (lower = better)
 
-# Sliced LHD: 3 slices of 4 points each, 2 dimensions
+# Sliced LHD: 3 slices of 4 points each
 result = maximinSLHD(t=3, m=4, k=2, random_state=42)
 print(result.design)        # shape (12, 3): first col = slice label 1..3
-print(result.std_design)    # shape (12, 3)
 ```
 
-## API
+**Nested LHD:**
+
+```python
+from gethypercube import nested_lhd, nested_maximin_lhd
+
+# Qian (2009): n_{i+1} % n_i == 0, e.g. [2, 4, 8]
+layers_qian = nested_lhd(k=2, m_layers=[2, 4, 8], seed=42)
+
+# Rennen et al. (2010): (n_{i+1}-1) % (n_i-1) == 0, space-filling
+layers_maximin = nested_maximin_lhd(k=2, m_layers=[2, 3, 5], seed=42)
+```
+
+## Package layout
+
+- `gethypercube.sliced_lhd` — maximin SLHD: `maximinSLHD`, `SLHDResult`, `lhs_degree`, `ks_test_uniform`, `is_valid_lhd`, `is_valid_slhd`
+- `gethypercube.nested_lhd` — nested designs: `nested_lhd` (Qian), `nested_maximin_lhd` (Rennen), `build_nested_lhd`, `extend_to_layer`, validation and layer helpers
+
+Top-level imports: `from gethypercube import maximinSLHD, nested_lhd, nested_maximin_lhd, ...`
+
+## API (sliced LHD)
 
 ### `maximinSLHD(t, m, k, power=15, nstarts=1, itermax=100, total_iter=1_000_000, random_state=None)`
 
@@ -55,30 +71,23 @@ print(result.std_design)    # shape (12, 3)
 | `t` | — | Number of slices (`t=1` → standard LHD) |
 | `m` | — | Points per slice; total `n = m * t` |
 | `k` | — | Number of input dimensions |
-| `power` | `15` | Exponent `r` in the average reciprocal distance criterion |
-| `nstarts` | `1` | Independent random restarts; best result is returned |
-| `itermax` | `100` | Non-improving iterations before SA temperature cools |
-| `total_iter` | `1_000_000` | Hard cap on total SA iterations |
-| `random_state` | `None` | Integer seed for reproducibility |
+| `power` | `15` | Exponent in average reciprocal distance criterion |
+| `nstarts` | `1` | Random restarts; best result returned |
+| `itermax` | `100` | Non-improving iterations before SA cools |
+| `total_iter` | `1_000_000` | Cap on total SA iterations |
+| `random_state` | `None` | Seed for reproducibility |
 
-Returns an `SLHDResult` dataclass with fields `design`, `std_design`, `measure`, `temp0`, `n_slices`, `n_per_slice`, `n_dims`.
+Returns `SLHDResult` with `design`, `std_design`, `measure`, `temp0`, `n_slices`, `n_per_slice`, `n_dims`.
 
-## Algorithm
-
-Uses simulated annealing with:
-- **Within-slice column swaps** to maintain the SLHD constraint at every step
-- **Incremental distance updates** (`O(nk)` per step vs `O(n²k)` for full recompute)
-- **Average reciprocal distance** as the smooth surrogate for the maximin criterion
-
-See [Ba et al. (2015)](https://doi.org/10.1080/00401706.2014.957867) for details.
-
-## Running Tests
+## Running tests
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
-## Reference
+## References
 
-Ba, S., Brenneman, W. A. and Myers, W. R. (2015). "Optimal Sliced Latin Hypercube Designs." *Technometrics*, 57(4), 479–487.
+- Ba, S., Brenneman, W. A. and Myers, W. R. (2015). "Optimal Sliced Latin Hypercube Designs." *Technometrics*, 57(4), 479–487.
+- Qian, P. Z. G. (2009). "Nested Latin hypercube designs." *Biometrika*, 96(4), 957–970.
+- Rennen, G., Husslage, B., van Dam, E. R., den Hertog, D. (2010). "Nested maximin Latin hypercube designs." *Structural and Multidisciplinary Optimization*, 41, 371–395.

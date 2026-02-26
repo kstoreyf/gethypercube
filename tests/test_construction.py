@@ -2,8 +2,8 @@
 
 import numpy as np
 import pytest
-from slicedlhd.construction import random_slhd
-from slicedlhd.utils import is_valid_lhd, is_valid_slhd
+from gethypercube.sliced_lhd.construction import random_slhd
+from gethypercube.sliced_lhd import is_valid_lhd, is_valid_slhd
 
 
 def rng(seed=0):
@@ -42,14 +42,15 @@ class TestRandomSlhd:
         assert is_valid_lhd(D, m)
 
     def test_slice_values_in_correct_stratum(self):
-        """Values in slice s, any column, must lie in {s*m+1 ... (s+1)*m}."""
+        """Paper's def: each slice has one value per level bin {1..t}, {t+1..2t}, ..."""
         t, m, k = 3, 4, 3
         D = random_slhd(t=t, m=m, k=k, rng=rng())
+        expected_levels = set(range(1, m + 1))
         for s in range(t):
-            lo, hi = s * m + 1, (s + 1) * m
-            block = D[s * m: (s + 1) * m, :]
-            assert block.min() >= lo
-            assert block.max() <= hi
+            block = D[s * m : (s + 1) * m, :]
+            for j in range(k):
+                levels = set(np.ceil(block[:, j].astype(float) / t).astype(int))
+                assert levels == expected_levels
 
     def test_different_seeds_give_different_designs(self):
         t, m, k = 2, 5, 3

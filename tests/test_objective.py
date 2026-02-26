@@ -2,8 +2,8 @@
 
 import numpy as np
 import pytest
-from slicedlhd.construction import random_slhd
-from slicedlhd.objective import (
+from gethypercube.sliced_lhd.construction import random_slhd
+from gethypercube.sliced_lhd.objective import (
     compute_phi,
     init_dist_matrix,
     phi_from_dist_sq,
