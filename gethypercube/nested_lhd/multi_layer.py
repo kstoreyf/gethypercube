@@ -50,11 +50,12 @@ def extend_to_layer_int(
     c = (n_large - 1) // (n_small - 1)
     X2 = np.zeros((n_large, k), dtype=np.int64)
     X2[:n_small, :] = X_inner_int * c
+    n_complement = n_large - n_small
+    row_perm = rng.permutation(n_complement)
     for j in range(k):
         used = set(X2[:n_small, j].tolist())
-        available = np.array([x for x in range(n_large) if x not in used])
-        rng.shuffle(available)
-        X2[n_small:, j] = available
+        available = np.array(sorted([x for x in range(n_large) if x not in used]))
+        X2[n_small:, j] = available[row_perm]
     X2 = run_ese_extend(
         X2,
         n_1=n_small,
@@ -109,12 +110,13 @@ def extend_to_layer(
     X2 = np.zeros((n_large, k), dtype=np.int64)
     X2[:n_small, :] = X_inner_int * c
 
-    # Step B: fill outer complement (integer grid 0..n_large-1)
+    # Step B: fill outer complement (integer grid 0..n_large-1); coupled shuffle for joint uniformity
+    n_complement = n_large - n_small
+    row_perm = rng.permutation(n_complement)
     for j in range(k):
         used = set(X2[:n_small, j].tolist())
-        available = np.array([x for x in range(n_large) if x not in used])
-        rng.shuffle(available)
-        X2[n_small:, j] = available
+        available = np.array(sorted([x for x in range(n_large) if x not in used]))
+        X2[n_small:, j] = available[row_perm]
 
     # Step C: optimise
     X2 = run_ese_extend(
