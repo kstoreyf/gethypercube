@@ -29,6 +29,30 @@ call to _build_qian_column at each two-layer step.  No row_perm coupling across
 columns is applied — joint uniformity comes from the probabilistic properties of
 the circulant walk (Proposition 2.1 in Qian 2009), not from cross-column
 coupling which would introduce negative correlation artefacts.
+
+Centered-discrepancy optimization (optimization='cd')
+------------------------------------------------------
+After each complement-fill step the complement rows can be improved by a
+column-swap hill-climbing pass on centered L2-discrepancy (Hickernell 1998).
+Inner rows are held fixed; only complement-row values are rearranged within
+their column.  Each swap is accepted if it reduces CD².
+
+Correct incremental update after swapping X[p, col] and X[q, col]:
+
+  Let f(z_r)    = Π_l (1 + ½|z_rl| - ½z_rl²)       [T2 row factor]
+  Let g(z_r,zs) = Π_l (1 + ½|z_rl - z_sl|)          [T3 pair factor]
+
+  delta_T2 = (2/n) * [(f(z_p_new) + f(z_q_new)) - (f(z_p_old) + f(z_q_old))]
+
+  delta_T3 = (2/n²) * [
+      Σ_{r ≠ p,q} (g(z_p_new,z_r) - g(z_p_old,z_r))   ← p vs rest
+    + Σ_{r ≠ p,q} (g(z_q_new,z_r) - g(z_q_old,z_r))   ← q vs rest
+    + (g(z_p_new,z_q_new) - g(z_p_old,z_q_old))        ← cross term, once
+  ]
+  (self terms g(z_r,z_r)=1 always cancel; factor 2 covers both directions)
+
+  delta_CD² = -delta_T2 + delta_T3
+  accept if delta_CD² < 0
 """
 
 from __future__ import annotations
@@ -38,6 +62,173 @@ from math import gcd
 
 from .validate import validate_m_layers_qian, validate_result
 from .utils import random_integer_lhd
+
+
+# ---------------------------------------------------------------------------
+# Centered-discrepancy helpers
+# ---------------------------------------------------------------------------
+
+def _centered_discrepancy(X_norm: np.ndarray) -> float:
+    """
+    Centered L2-discrepancy (Hickernell 1998) for a design in [0, 1]^k.
+
+    CD²(X) = (13/12)^k
+             - (2/n) * Σ_i Π_j (1 + ½|z_ij| - ½z_ij²)
+             + (1/n²) * Σ_i Σ_l Π_j (1 + ½|z_ij| + ½|z_lj| - ½|z_ij - z_lj|)
+
+    where z = X - 0.5.  Returns CD² (not CD).
+    O(n²k) — used once per layer to seed the incremental loop.
+    """
+    n, k = X_norm.shape
+    z = X_norm - 0.5
+    t1 = (13.0 / 12.0) ** k
+    t2 = (2.0 / n) * np.sum(np.prod(1.0 + 0.5 * np.abs(z) - 0.5 * z ** 2, axis=1))
+    zi = z[:, None, :]      # (n, 1, k)
+    zl = z[None, :, :]      # (1, n, k)
+    t3 = (1.0 / n ** 2) * np.sum(
+        np.prod(1.0 + 0.5 * np.abs(zi) + 0.5 * np.abs(zl) - 0.5 * np.abs(zi - zl), axis=2)
+    )
+    return float(t1 - t2 + t3)
+
+
+def _f_t2(z_row: np.ndarray) -> float:
+    """T2 row factor: Π_l (1 + ½|z_l| - ½z_l²)."""
+    return float(np.prod(1.0 + 0.5 * np.abs(z_row) - 0.5 * z_row ** 2))
+
+
+def _g_pair(z_p: np.ndarray, z_q: np.ndarray) -> float:
+    """T3 pair factor: Π_l (1 + ½|z_pl| + ½|z_ql| - ½|z_pl - z_ql|)."""
+    return float(np.prod(1.0 + 0.5 * np.abs(z_p) + 0.5 * np.abs(z_q) - 0.5 * np.abs(z_p - z_q)))
+
+
+def _g_self(z_r: np.ndarray) -> float:
+    """T3 diagonal factor g(r,r): Π_l (1 + |z_rl|)."""
+    return float(np.prod(1.0 + np.abs(z_r)))
+
+
+def _row_cross_sums(z: np.ndarray, r: int, exclude: list[int]) -> float:
+    """
+    Σ_{s not in exclude} g(z[r], z[s])  — O(nk).
+
+    Uses the correct Hickernell T3 kernel g(u,v) = Π_j(1 + ½|u_j| + ½|v_j| - ½|u_j - v_j|).
+    Computes full row-product sum then subtracts excluded terms.
+    Note: g(r,r) = Π_j(1 + |z_rj|) ≠ 1 in general.
+    """
+    abs_r = np.abs(z[r])                                   # (k,)
+    abs_z = np.abs(z)                                      # (n, k)
+    diffs = np.abs(z[r] - z)                               # (n, k)
+    prods = np.prod(1.0 + 0.5 * abs_r + 0.5 * abs_z - 0.5 * diffs, axis=1)  # (n,)
+    total = float(prods.sum())
+    for e in exclude:
+        total -= float(prods[e])
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Complement optimizer
+# ---------------------------------------------------------------------------
+
+def _optimise_complement(
+    X_int: np.ndarray,
+    inner_indices: list[int],
+    complement_indices: list[int],
+    n_outer: int,
+    rng: np.random.Generator,
+    n_iter: int = 1000,
+) -> np.ndarray:
+    """
+    Improve space-filling of complement rows via column-swap hill climbing on
+    centered L2-discrepancy.  Inner rows are held fixed throughout.
+
+    Uses an O(nk) incremental update of CD² per candidate swap, with the
+    cross-term between the two swapped rows handled correctly (counted once).
+
+    Parameters
+    ----------
+    X_int            : (n_current, k) integer design on {0, ..., n_outer-1}.
+    inner_indices    : row indices that must not move.
+    complement_indices: row indices eligible for swapping.
+    n_outer          : grid size — used to normalise to [0,1] via midpoints.
+    rng              : random generator.
+    n_iter           : number of candidate swaps to evaluate.
+
+    Returns
+    -------
+    np.ndarray of same shape as X_int, complement placement improved.
+    """
+    n_comp = len(complement_indices)
+    if n_comp < 2:
+        return X_int.copy()
+
+    X = X_int.copy()
+    n, k = X.shape
+    comp_arr = np.array(complement_indices, dtype=np.int64)
+
+    # Normalise to [0,1] midpoint convention, then shift: z = X_norm - 0.5
+    X_norm = (X.astype(np.float64) + 0.5) / n_outer
+    z = X_norm - 0.5    # shape (n, k), values in (-0.5, 0.5)
+
+    for _ in range(n_iter):
+        # Pick two distinct complement rows and a random column
+        idx = rng.choice(n_comp, size=2, replace=False)
+        p, q = int(comp_arr[idx[0]]), int(comp_arr[idx[1]])
+        col = int(rng.integers(0, k))
+
+        if z[p, col] == z[q, col]:
+            continue
+
+        # ---- T2 delta (before swap) ----
+        old_f_p = _f_t2(z[p])
+        old_f_q = _f_t2(z[q])
+
+        # ---- T3: diagonal self-terms before swap ----
+        # With the correct Hickernell kernel, g(r,r) = Π_j(1+|z_rj|) ≠ 1,
+        # and g(p,p) changes when z[p,col] is swapped.
+        old_gpp = _g_self(z[p])
+        old_gqq = _g_self(z[q])
+
+        # ---- T3 cross sums (before swap) ----
+        # Sum over all rows except p and q (diagonal and cross terms handled separately).
+        # Cross term g(p,q) is unchanged by the swap (symmetric in the two values),
+        # so we skip it — its contribution to delta_t3 is zero.
+        old_cross_p = _row_cross_sums(z, p, exclude=[p, q])
+        old_cross_q = _row_cross_sums(z, q, exclude=[p, q])
+
+        # ---- Tentative swap in z ----
+        z[p, col], z[q, col] = z[q, col], z[p, col]
+
+        # ---- T2 delta (after swap) ----
+        new_f_p = _f_t2(z[p])
+        new_f_q = _f_t2(z[q])
+        delta_t2 = (2.0 / n) * ((new_f_p + new_f_q) - (old_f_p + old_f_q))
+
+        # ---- T3: diagonal self-terms after swap ----
+        new_gpp = _g_self(z[p])
+        new_gqq = _g_self(z[q])
+
+        # ---- T3 cross sums (after swap) ----
+        new_cross_p = _row_cross_sums(z, p, exclude=[p, q])
+        new_cross_q = _row_cross_sums(z, q, exclude=[p, q])
+
+        # Full delta for T3:
+        #   2*(off-diagonal rows paired with p or q)  +  diagonal correction
+        delta_t3 = (1.0 / (n * n)) * (
+            2.0 * (new_cross_p - old_cross_p)
+          + 2.0 * (new_cross_q - old_cross_q)
+          + (new_gpp - old_gpp)
+          + (new_gqq - old_gqq)
+        )
+
+        delta_cd2 = -delta_t2 + delta_t3
+
+        if delta_cd2 < 0.0:
+            # Accept: update integer design (z already swapped)
+            X[p, col], X[q, col] = X[q, col], X[p, col]
+        else:
+            # Revert z
+            z[p, col], z[q, col] = z[q, col], z[p, col]
+
+    return X
 
 
 # ---------------------------------------------------------------------------
@@ -53,71 +244,44 @@ def _build_qian_column(
     Build one column of a two-layer nested design following Qian (2009) Section 2.
 
     Constructs a vector π of length n on integer levels {0, ..., n-1} such that:
-      - The first m entries τ form a valid m-layer: one entry per stratum
-        {0, ..., m-1} (i.e. floor(τ_i * m / n) are a permutation of {0..m-1}).
-      - All n entries form a valid n-layer: one entry per level {0, ..., n-1}.
+      - The first m entries τ form a valid m-layer: one entry per coarse stratum
+        {0, ..., m-1} mapped to fine levels {0, ..., n-1}.
+      - All n entries form a valid n-layer: permutation of {0, ..., n-1}.
 
-    Internally works on the 1-indexed lcm grid {1, ..., l} where l = lcm(m, n),
-    then converts to 0-indexed {0, ..., n-1} for the output.
+    Works internally on the 1-indexed lcm grid {1, ..., l}, l = lcm(m, n).
 
     Parameters
     ----------
-    m : int
-        Inner layer size.
-    n : int
-        Outer layer size.  Must be a multiple of m (Qian divisibility).
-    rng : np.random.Generator
+    m : inner layer size.
+    n : outer layer size; must be a multiple of m.
+    rng : random generator.
 
     Returns
     -------
-    np.ndarray of shape (n,) dtype int64
-        First m entries are the inner layer (levels in {0, ..., n-1} that each
-        fall in a distinct coarse stratum of width n/m).
-        All n entries are a permutation of {0, ..., n-1}.
+    np.ndarray shape (n,) dtype int64.
+    First m entries: inner layer.  All n entries: permutation of {0..n-1}.
     """
-    l = (m * n) // gcd(m, n)    # lcm(m, n)
-    n_prime = l // m             # = n / gcd(m,n) ... since n%m==0, n_prime = n//m = c
-    m_prime = l // n             # = m / gcd(m,n) ... since n%m==0, m_prime = 1
+    l = (m * n) // gcd(m, n)
+    n_prime = l // m     # = n // m  (since n % m == 0)
+    m_prime = l // n     # = 1       (since n % m == 0)
 
-    # ------------------------------------------------------------------
     # Step 1: circulant walk v of length m on {1, ..., n'}
-    # M_{m', n'} is (n' - m' + 1) x n' circulant matrix.
-    # Row r of M (0-indexed) applied to column index col (1-indexed):
-    #   M[r, col] = ((col - 1 + r) % n') + 1
-    # ------------------------------------------------------------------
-    n_rows_circulant = n_prime - m_prime + 1   # number of rows in M
+    n_rows_circulant = n_prime - m_prime + 1
     v = np.zeros(m, dtype=np.int64)
-    v[0] = rng.integers(1, n_prime + 1)        # uniform on {1, ..., n'}
+    v[0] = rng.integers(1, n_prime + 1)
     for i in range(1, m):
-        r = rng.integers(0, n_rows_circulant)  # random row of M
+        r = rng.integers(0, n_rows_circulant)
         v[i] = ((v[i - 1] - 1 + r) % n_prime) + 1
 
-    # ------------------------------------------------------------------
-    # Step 2: build τ on {1, ..., l}
-    # Pool: {v(i) + n'*(i-1) : i = 1..m} (1-indexed i)
-    # Randomly permute the pool to get τ.
-    # ------------------------------------------------------------------
+    # Step 2: τ on {1, ..., l} — randomly permute pool {v(i) + n'*(i) : i=0..m-1}
     tau_pool = np.array([v[i] + n_prime * i for i in range(m)], dtype=np.int64)
     tau = rng.permutation(tau_pool)
 
-    # S = {1, ..., n} \ {ceil(τ(i) / m') : i = 1..m}
-    # Since m_prime = 1 when n % m == 0, ceil(τ(i) / 1) = τ(i).
-    # But τ(i) are on the l-scale; coarse index = ceil(τ(i) / n') in {1..m}
-    # and fine index for n-layer = ceil(τ(i) / m') = τ(i) since m'=1.
-    # We need the n-scale strata occupied by τ:
-    #   n-stratum of value x on l-scale = ceil(x / m') - 1  (0-indexed)
-    #   = ceil(x / 1) - 1 = x - 1   when m_prime = 1
-    # Since m_prime may not always be 1 for non-divisible cases, keep general:
+    # S = free n-strata (0-indexed)
     used_n_strata = set(int(np.ceil(t / m_prime)) - 1 for t in tau)
-    S = [s for s in range(n) if s not in used_n_strata]  # 0-indexed free n-strata
+    S = [s for s in range(n) if s not in used_n_strata]
 
-    # ------------------------------------------------------------------
-    # Step 3: build ρ on {1, ..., l} for the n - m complement entries
-    # ρ(i) = t(i) + m' * s_i  where t(i) ~ Uniform{1..m'}, s_i = S[i] (0-indexed)
-    # On the l-scale: s_i (0-indexed n-stratum) → 1-indexed = s_i + 1
-    #   ρ(i) = t(i) + m' * s_i   (using 0-indexed s_i and 1-indexed t and l-values)
-    # Check: ceil(ρ(i) / m') = s_i + 1 → n-stratum index s_i ✓
-    # ------------------------------------------------------------------
+    # Step 3: ρ on {1, ..., l}
     assert len(S) == n - m, f"S has wrong size: {len(S)} != {n - m}"
     rho_pool = np.array([
         rng.integers(1, m_prime + 1) + m_prime * S[i]
@@ -125,16 +289,10 @@ def _build_qian_column(
     ], dtype=np.int64)
     rho = rng.permutation(rho_pool)
 
-    # ------------------------------------------------------------------
-    # Convert from l-scale {1, ..., l} to n-scale {0, ..., n-1}
-    # n-stratum of l-value x = ceil(x / m') - 1  (0-indexed)
-    # Within each n-stratum there are m' l-values; since m'=1 when n%m==0,
-    # there is exactly one l-value per n-stratum, so the mapping is injective.
-    # ------------------------------------------------------------------
+    # Convert l-scale → n-scale {0, ..., n-1}
     tau_n = np.array([int(np.ceil(t / m_prime)) - 1 for t in tau], dtype=np.int64)
     rho_n = np.array([int(np.ceil(r / m_prime)) - 1 for r in rho], dtype=np.int64)
 
-    # Stack: inner layer first, then complement
     return np.concatenate([tau_n, rho_n])
 
 
@@ -150,21 +308,10 @@ def _two_layer_qian(
 ) -> np.ndarray:
     """
     Build a two-layer nested integer design of shape (n, k).
+    Rows 0..m-1: inner layer.  All n rows: valid n-layer LHD.
+    Columns generated independently.
 
-    Rows 0..m-1 form the inner m-layer (each column a permutation of
-    coarse strata {0..m-1} mapped to {0..n-1}).
-    All n rows form the outer n-layer (each column a permutation of {0..n-1}).
-    Columns are generated independently (no cross-column coupling).
-
-    Parameters
-    ----------
-    m, n : inner and outer layer sizes; n must be a multiple of m.
-    k : number of dimensions.
-    rng : random generator.
-
-    Returns
-    -------
-    np.ndarray of shape (n, k), dtype int64, values in {0, ..., n-1}.
+    Returns np.ndarray (n, k) int64, values in {0, ..., n-1}.
     """
     X = np.zeros((n, k), dtype=np.int64)
     for j in range(k):
@@ -180,62 +327,69 @@ def _build_multilayer_integer(
     m_layers: list[int],
     k: int,
     rng: np.random.Generator,
+    n_iter_cd: int | None = 0,
+    rng_opt: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, dict[int, list[int]]]:
     """
     Build the full integer design for all layers on the finest grid {0..n_L-1}.
 
-    For each consecutive pair (n_{i-1}, n_i):
-      1. Build a fresh two-layer design on the n_i grid {0..n_i-1}.
-      2. The inner layer (rows 0..n_{i-1}-1) tells us which n_i-grid slots
-         the existing inner points land in — but we do NOT use these rows
-         directly.  Instead we re-embed the existing inner rows from the
-         accumulating design by multiplying by c = n_i // n_{i-1}.
-      3. Only the complement rows (rows n_{i-1}..n_i-1) from the fresh
-         two-layer design are new.  We keep their relative positions within
-         the n_i grid, then re-scale to n_L at the end.
+    At each expansion step:
+      1. Re-embed existing rows onto n_outer grid (multiply by c = n_outer/n_inner).
+      2. Fill complement: for each column, shuffle the remaining available levels.
+      3. Optionally run CD hill-climbing on complement rows only (inner fixed).
 
-    To keep things consistent, we maintain all coordinates on the CURRENT
-    layer's grid {0..n_i-1} during assembly, then do a single final
-    re-scaling to {0..n_L-1} at the end.
+    Layer membership is tracked explicitly via index sets (not assumed row order).
+
+    Parameters
+    ----------
+    n_iter_cd : CD swap budget per complement step.
+        0       — no optimisation.
+        None    — auto: n_comp * k * 10 per step (scales with complement size).
+        int > 0 — that many swap candidates at every step (fixed budget).
+    rng_opt : independent RNG for CD swaps; keeps main rng unaffected.
     """
+    _rng_opt = rng_opt if rng_opt is not None else rng
+
+    def _n_iter_for(n_comp: int) -> int:
+        """Resolve per-step swap budget."""
+        if n_iter_cd == 0:
+            return 0
+        if n_iter_cd is None:
+            return n_comp * k * 10
+        return int(n_iter_cd)
+
     n_L = m_layers[-1]
     layer_indices: dict[int, list[int]] = {}
 
-    # --- Step 1: first two layers ---
+    # --- First two layers ---
     n1, n2 = m_layers[0], m_layers[1]
-    X_current = _two_layer_qian(n1, n2, k, rng)  # shape (n2, k), values {0..n2-1}
+    X_current = _two_layer_qian(n1, n2, k, rng)   # (n2, k), {0..n2-1}
 
     layer_indices[n1] = list(range(n1))
     layer_indices[n2] = list(range(n2))
     n_placed = n2
 
-    # --- Steps 2+: extend layer by layer ---
+    _ni = _n_iter_for(n2 - n1)
+    if _ni > 0:
+        X_current = _optimise_complement(
+            X_current,
+            inner_indices=list(range(n1)),
+            complement_indices=list(range(n1, n2)),
+            n_outer=n2,
+            rng=_rng_opt,
+            n_iter=_ni,
+        )
+
+    # --- Subsequent layers ---
     for i in range(2, len(m_layers)):
         n_inner = m_layers[i - 1]
         n_outer = m_layers[i]
         c = n_outer // n_inner
 
-        # Re-embed existing rows onto the n_outer grid by multiplying by c.
-        # This maps {0..n_inner-1} → {0, c, 2c, ..., (n_inner-1)*c} ⊂ {0..n_outer-1}.
-        X_current = X_current * c   # shape (n_placed, k), now on {0..n_outer-1} subset
+        # Re-embed onto n_outer grid
+        X_current = X_current * c
 
-        # Build a fresh two-layer design for (n_inner, n_outer).
-        # We only need its complement rows — the inner rows tell us the
-        # coarse-grid positions but we already have those from X_current.
-        X_pair = _two_layer_qian(n_inner, n_outer, k, rng)
-        # X_pair rows n_inner..n_outer-1 are on {0..n_outer-1}
-
-        # However the complement rows in X_pair were built relative to
-        # X_pair's own inner layer, which differs from X_current's inner
-        # layer positions (since X_pair is a fresh independent draw).
-        # We cannot use X_pair's complement directly — it would conflict
-        # with X_current's occupied slots.
-        #
-        # Instead: determine the occupied fine-grid levels from X_current,
-        # then fill the complement by assigning remaining levels per column
-        # independently (each column gets a random permutation of its
-        # available levels).  This is valid because the complement rows
-        # only need to cover the unoccupied n_outer strata.
+        # Fill complement independently per column
         n_new = n_outer - n_inner
         complement = np.zeros((n_new, k), dtype=np.int64)
         for j in range(k):
@@ -253,16 +407,24 @@ def _build_multilayer_integer(
 
         X_current = np.vstack([X_current, complement])
 
+        _ni = _n_iter_for(n_new)
+        if _ni > 0:
+            X_current = _optimise_complement(
+                X_current,
+                inner_indices=list(range(n_placed)),
+                complement_indices=list(range(n_placed, n_placed + n_new)),
+                n_outer=n_outer,
+                rng=_rng_opt,
+                n_iter=_ni,
+            )
+
         new_indices = list(range(n_placed, n_placed + n_new))
         layer_indices[n_outer] = layer_indices[n_inner] + new_indices
         n_placed += n_new
 
-    # --- Final re-scale from n_L grid (already on it after last expansion) ---
-    # After the last expansion X_current is on {0..n_L-1} — no further scaling needed.
     assert X_current.shape == (n_L, k), (
         f"Shape mismatch: expected ({n_L}, {k}), got {X_current.shape}"
     )
-
     return X_current, layer_indices
 
 
@@ -272,8 +434,8 @@ def _build_multilayer_integer(
 
 def _check_integer_lhd(X: np.ndarray, n: int, indices: list[int]) -> bool:
     """
-    Check that rows `indices` of X form a valid LHD on the n-grid.
-    Each column must contain exactly one value per stratum of width n_L // n.
+    Check rows `indices` of X form a valid LHD on the n-grid.
+    Each column must have exactly one value per stratum of width n_L // n.
     """
     n_L = X.shape[0]
     stride = n_L // n
@@ -289,12 +451,16 @@ def _check_integer_lhd(X: np.ndarray, n: int, indices: list[int]) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+_VALID_OPTIMIZATIONS = frozenset({"cd"})
+
+
 def nested_lhd(
     k: int,
     m_layers: list[int] | int,
     seed: int | None = None,
     scramble: bool = True,
-    optimise: bool = False,
+    optimization: str | None = None,
+    n_iter: int | None = None,
 ) -> list[np.ndarray]:
     """
     Construct a multi-layer nested Latin hypercube design using Qian (2009).
@@ -302,13 +468,12 @@ def nested_lhd(
     Divisibility constraint: n_{i+1} % n_i == 0 for all consecutive pairs.
 
     Each column is generated independently via a circulant-matrix walk on the
-    lcm grid (Qian 2009, Section 2).  No cross-column row coupling is applied;
-    joint uniformity comes from the independent valid-column construction.
+    lcm grid (Qian 2009, Section 2).  No cross-column row coupling is applied.
 
     Coordinate convention: zero-indexed strata {0, ..., n-1} converted to
-    continuous via (level + u) / n_L where u is drawn once for the full design
-    and all inner layers inherit the same u at their row positions.  Strata
-    [k/n_L, (k+1)/n_L) tile [0, 1) with no directional edge bias.
+    continuous via (level + u) / n_L.  u drawn once for the full design;
+    inner layers inherit it via their row indices.  Strata [k/n_L, (k+1)/n_L)
+    tile [0, 1) with no directional edge bias.
 
     Parameters
     ----------
@@ -320,31 +485,49 @@ def nested_lhd(
     seed : int or None
         Random seed for reproducibility.
     scramble : bool
-        If True (default), u ~ Uniform(0, 1) per cell — genuine randomness within
-        each stratum.  If False, u = 0.5 — deterministic midpoint of each stratum.
-    optimise : bool
-        Reserved for future post-hoc ESE improvement pass.  Currently ignored.
+        If True (default), u ~ Uniform(0, 1) per cell.
+        If False, u = 0.5 (deterministic stratum midpoint).
+    optimization : str or None
+        ``'cd'`` — centered-discrepancy hill climbing after each complement fill.
+        Inner rows held fixed; nested structure preserved exactly.
+        ``None`` (default) — no optimisation.
+    n_iter : int or None
+        Swap candidates per complement-fill step when ``optimization='cd'``.
+
+        ``None`` (default) — auto: ``n_comp * k * 10`` per step, where
+        ``n_comp`` is the number of complement rows at that step.  This
+        scales naturally so larger complements get proportionally more work.
+
+        Positive ``int`` — fixed budget at every step regardless of size.
 
     Returns
     -------
     list of np.ndarray
         layers[i] is (m_layers[i], k) float64 in [0, 1).
-        layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1] as exact row subsets.
-        Each layers[i] is a valid LHD: one point per stratum [j/n, (j+1)/n)
-        in each dimension.
+        layers[0] ⊂ ... ⊂ layers[L-1] as exact row subsets.
+        Each layers[i] is a valid LHD.
 
     Raises
     ------
     ValueError
-        If m_layers violates the Qian divisibility constraint.
+        If m_layers violates the Qian divisibility constraint, or optimization
+        is not recognised.
 
     Examples
     --------
     >>> layers = nested_lhd(k=2, m_layers=[100, 200, 400, 800, 1600], seed=42)
     >>> [layer.shape for layer in layers]
     [(100, 2), (200, 2), (400, 2), (800, 2), (1600, 2)]
+
+    >>> layers = nested_lhd(k=4, m_layers=[50, 100, 200], seed=0,
+    ...                     optimization='cd', n_iter=2000)
     """
-    # Handle single-layer degenerate case
+    if optimization is not None and optimization not in _VALID_OPTIMIZATIONS:
+        raise ValueError(
+            f"optimization must be one of {sorted(_VALID_OPTIMIZATIONS)} or None, "
+            f"got {optimization!r}"
+        )
+
     if isinstance(m_layers, int):
         m_layers = [m_layers]
     if len(m_layers) == 1:
@@ -355,31 +538,42 @@ def nested_lhd(
         return [(X_int.astype(float) + u) / n]
 
     validate_m_layers_qian(m_layers)
-    rng = np.random.default_rng(seed)
     n_L = m_layers[-1]
+    # n_iter_cd: 0 = disabled, None = auto-scale, positive int = fixed per step
+    if optimization == "cd":
+        n_iter_cd: int | None = n_iter   # None → auto in _build_multilayer_integer
+    else:
+        n_iter_cd = 0
+    rng = np.random.default_rng(seed)
 
-    # --- Build full integer design and layer index map ---
-    X_int, layer_indices = _build_multilayer_integer(m_layers, k, rng)
+    # Create an independent RNG for CD swaps whenever optimization is active
+    # (n_iter_cd is None for auto, or a positive int for fixed budget).
+    if n_iter_cd != 0:
+        # Derive independent RNG for CD swaps so that scramble jitter u
+        # is identical to the optimization=None case at the same seed.
+        rng_opt: np.random.Generator | None = np.random.default_rng(
+            np.random.SeedSequence(seed).spawn(1)[0]
+        )
+    else:
+        rng_opt = None
 
-    # --- Internal validation: check each layer is a valid LHD on its own grid ---
+    X_int, layer_indices = _build_multilayer_integer(
+        m_layers, k, rng, n_iter_cd=n_iter_cd, rng_opt=rng_opt
+    )
+
     for n in m_layers:
         assert _check_integer_lhd(X_int, n, layer_indices[n]), (
             f"Internal error: layer n={n} failed integer LHD check. "
             "Please report this as a bug."
         )
 
-    # --- Single conversion to continuous: u drawn once, shared across all layers ---
     if scramble:
         u = rng.random((n_L, k))
     else:
         u = np.full((n_L, k), 0.5)
 
     full = (X_int.astype(np.float64) + u) / n_L
-
-    # --- Extract layers using explicit tracked indices ---
     layers = [full[layer_indices[n], :].copy() for n in m_layers]
 
-    # --- Final validation ---
     validate_result(layers, m_layers, k, convention="stratum", nesting_check="exact")
-
     return layers
