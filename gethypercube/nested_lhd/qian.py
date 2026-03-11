@@ -282,7 +282,8 @@ def _build_qian_column(
     S = [s for s in range(n) if s not in used_n_strata]
 
     # Step 3: ρ on {1, ..., l}
-    assert len(S) == n - m, f"S has wrong size: {len(S)} != {n - m}"
+    if len(S) != n - m:
+        raise RuntimeError(f"S has wrong size: {len(S)} != {n - m}")
     rho_pool = np.array([
         rng.integers(1, m_prime + 1) + m_prime * S[i]
         for i in range(n - m)
@@ -398,10 +399,11 @@ def _build_multilayer_integer(
                 sorted(x for x in range(n_outer) if x not in used),
                 dtype=np.int64,
             )
-            assert len(available) == n_new, (
-                f"Available levels mismatch at layer {i}, col {j}: "
-                f"expected {n_new}, got {len(available)}"
-            )
+            if len(available) != n_new:
+                raise RuntimeError(
+                    f"Available levels mismatch at layer {i}, col {j}: "
+                    f"expected {n_new}, got {len(available)}"
+                )
             rng.shuffle(available)
             complement[:, j] = available
 
@@ -422,9 +424,10 @@ def _build_multilayer_integer(
         layer_indices[n_outer] = layer_indices[n_inner] + new_indices
         n_placed += n_new
 
-    assert X_current.shape == (n_L, k), (
-        f"Shape mismatch: expected ({n_L}, {k}), got {X_current.shape}"
-    )
+    if X_current.shape != (n_L, k):
+        raise RuntimeError(
+            f"Shape mismatch: expected ({n_L}, {k}), got {X_current.shape}"
+        )
     return X_current, layer_indices
 
 
@@ -535,7 +538,9 @@ def nested_lhd(
         rng = np.random.default_rng(seed)
         X_int = random_integer_lhd(n, k, rng)
         u = rng.random((n, k)) if scramble else np.full((n, k), 0.5)
-        return [(X_int.astype(float) + u) / n]
+        layers = [(X_int.astype(float) + u) / n]
+        validate_result(layers, m_layers, k, convention="stratum")
+        return layers
 
     validate_m_layers_qian(m_layers)
     n_L = m_layers[-1]
@@ -562,10 +567,11 @@ def nested_lhd(
     )
 
     for n in m_layers:
-        assert _check_integer_lhd(X_int, n, layer_indices[n]), (
-            f"Internal error: layer n={n} failed integer LHD check. "
-            "Please report this as a bug."
-        )
+        if not _check_integer_lhd(X_int, n, layer_indices[n]):
+            raise RuntimeError(
+                f"Internal error: layer n={n} failed integer LHD check. "
+                "Please report this as a bug."
+            )
 
     if scramble:
         u = rng.random((n_L, k))

@@ -23,58 +23,6 @@ def scaling_factor(k: int, n: int) -> float:
     return 1.0 / ((k * (n - 1)) ** (1.0 / k))
 
 
-def min_scaled_separation(
-    X_int: np.ndarray, n: int, k: int
-) -> float:
-    """
-    Minimum scaled separation distance for point set X_int (integer grid 0..n-1).
-
-    d = min_{p != q} ||X[p] - X[q]||_2 / s
-    where continuous coords are X_int / (n-1), and s = 1/(k*(n-1))^(1/k).
-
-    So in integer space: dist_cont = dist_int / (n-1), and
-    d = (dist_int / (n-1)) * (k*(n-1))^(1/k) = dist_int * k^(1/k) / (n-1)^(1-1/k).
-
-    X_int : (n_pts, k) integer matrix
-    n : layer size (grid is 0..n-1)
-    k : number of dimensions
-    """
-    n_pts = X_int.shape[0]
-    if n_pts < 2:
-        return float("inf")
-    # Pairwise distances in integer grid; then scale to get d
-    from scipy.spatial.distance import pdist
-
-    d_int = pdist(X_int.astype(np.float64), metric="euclidean")
-    min_d_int = float(np.min(d_int))
-    if min_d_int <= 0:
-        return 0.0
-    s = scaling_factor(k, n)
-    # Continuous min dist = min_d_int / (n - 1)
-    min_d_cont = min_d_int / (n - 1)
-    return min_d_cont / s
-
-
-def min_scaled_separation_incremental(
-    dist_sq: np.ndarray, n: int, k: int
-) -> float:
-    """
-    Given squared Euclidean distance matrix (in integer grid units), return
-    min scaled separation d = (sqrt(min_dist_sq)/(n-1)) / s.
-    """
-    n_pts = dist_sq.shape[0]
-    if n_pts < 2:
-        return float("inf")
-    upper = np.triu_indices(n_pts, k=1)
-    min_d_sq = float(np.min(dist_sq[upper]))
-    if min_d_sq <= 0:
-        return 0.0
-    min_d_int = np.sqrt(min_d_sq)
-    s = scaling_factor(k, n)
-    min_d_cont = min_d_int / (n - 1)
-    return min_d_cont / s
-
-
 def integer_to_continuous(X_int: np.ndarray, n: int) -> np.ndarray:
     """Map integer grid {0, 1, ..., n-1} to [0, 1]: x -> x / (n-1). Rennen convention."""
     return X_int.astype(np.float64) / (n - 1)
@@ -99,33 +47,9 @@ def integer_to_continuous_stratum(
     return (X_int.astype(np.float64) + u) / n
 
 
-def scramble_layer_rennen(
-    layer: np.ndarray, n: int, rng: np.random.Generator
-) -> np.ndarray:
-    """
-    Randomly place values within each LHD cell (scipy QMC style).
-
-    layer has shape (m, k), values are grid 0, 1/(n-1), ..., 1 (Rennen convention).
-    Replaces each value in cell j with (j + u) / (n-1), u ~ Uniform(0, 1).
-    """
-    out = layer.copy()
-    j = np.clip(np.round(layer * (n - 1)).astype(np.int64), 0, n - 1)
-    u = rng.random(layer.shape, dtype=np.float64)
-    out[:] = (j + u) / (n - 1)
-    return out
-
-
 def integer_to_continuous_qian(X_int: np.ndarray, n: int) -> np.ndarray:
     """Map integer grid {1, 2, ..., n} to (0, 1]: x -> x / n. Qian endpoint convention."""
     return X_int.astype(np.float64) / n
-
-
-def integer_to_continuous_midpoint_1based(X_int: np.ndarray, n: int) -> np.ndarray:
-    """
-    Map integer grid {1, 2, ..., n} to (0, 1): x -> (2*x - 1) / (2*n).
-    Midpoint convention: levels at 1/(2n), 3/(2n), ..., (2n-1)/(2n).
-    """
-    return (2 * X_int.astype(np.float64) - 1) / (2 * n)
 
 
 def scramble_layer_midpoint(
@@ -144,22 +68,6 @@ def scramble_layer_midpoint(
     i_cell = np.clip(i_cell, 0, n - 1)
     u = rng.random(layer.shape, dtype=np.float64)
     out[:] = (i_cell + u) / n
-    return out
-
-
-def scramble_layer_qian(
-    layer: np.ndarray, n: int, rng: np.random.Generator
-) -> np.ndarray:
-    """
-    Randomly place values within each LHD cell (scipy QMC style).
-
-    layer has shape (m, k), values are grid 1/n, 2/n, ..., 1 (Qian convention).
-    Replaces each value in cell v (1..n) with (v - 1 + u) / n, u ~ Uniform(0, 1).
-    """
-    out = layer.copy()
-    v = np.clip(np.round(layer * n).astype(np.int64), 1, n)
-    u = rng.random(layer.shape, dtype=np.float64)
-    out[:] = (v - 1 + u) / n
     return out
 
 

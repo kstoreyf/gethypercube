@@ -112,7 +112,10 @@ def _initial_design(
     I1 = np.arange(n_1)
 
     inner_levels = np.arange(0, n_2, c)  # 0, c, 2c, ..., (n_1-1)*c
-    assert len(inner_levels) == n_1
+    if len(inner_levels) != n_1:
+        raise RuntimeError(
+            f"Inner level count {len(inner_levels)} != n_1={n_1}"
+        )
     mask = np.ones(n_2, dtype=bool)
     mask[inner_levels] = False
     outer_levels = np.where(mask)[0]
@@ -312,7 +315,8 @@ def two_layer_ese(
                 best_X2 = X2
                 best_I1 = I1
 
-    assert best_X2 is not None and best_I1 is not None
+    if best_X2 is None or best_I1 is None:
+        raise RuntimeError("ESE failed to produce a design")
     return best_X2, best_I1
 
 

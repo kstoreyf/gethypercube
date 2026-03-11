@@ -104,7 +104,8 @@ def sliced_lhd(
             if phi_val < best_phi:
                 best_phi = phi_val
                 best_D = D
-        assert best_D is not None
+        if best_D is None:
+            raise RuntimeError("SA failed to produce a design")
         D = best_D
     else:
         D = random_slhd(t, m, k, rng)

@@ -46,7 +46,6 @@ def phi_mm_from_dist_sq(
     """
     if t == 1:
         return phi_from_dist_sq(dist_sq, r)
-    n = dist_sq.shape[0]
     phi_full = phi_from_dist_sq(dist_sq, r)
     phi_slices = []
     for s in range(t):

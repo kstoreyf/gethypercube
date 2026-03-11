@@ -164,14 +164,16 @@ def check_nested(
     n_outer = X_outer.shape[0]
     if n_inner > n_outer:
         return False
+    # Round to a grid fine enough that distinct points stay distinct,
+    # then use set membership for O(n_inner + n_outer) lookup.
+    scale = round(1.0 / tol)
+    outer_set = set()
+    for j in range(n_outer):
+        key = tuple(np.round(X_outer[j] * scale).astype(np.int64))
+        outer_set.add(key)
     for i in range(n_inner):
-        row = X_inner[i]
-        found = False
-        for j in range(n_outer):
-            if np.allclose(row, X_outer[j], rtol=0, atol=tol):
-                found = True
-                break
-        if not found:
+        key = tuple(np.round(X_inner[i] * scale).astype(np.int64))
+        if key not in outer_set:
             return False
     return True
 
@@ -203,36 +205,29 @@ def validate_result(
     convention: str = "rennen",
     nesting_check: str | None = None,
 ) -> None:
-    """Run all post-construction checks. Raises AssertionError on first failure.
+    """Run all post-construction checks. Raises ValueError on first failure.
 
     For convention="midpoint", nesting_check can be:
     - "exact": layers[i] is the first m_layers[i] rows of layers[i+1] (Qian path).
     - "reembed": first m_layers[i] rows of layers[i+1] are re-embedding of layers[i] (Rennen path).
     Default "reembed" when convention is midpoint.
     """
-    assert len(layers) == len(m_layers)
+    if len(layers) != len(m_layers):
+        raise ValueError(
+            f"len(layers)={len(layers)} != len(m_layers)={len(m_layers)}"
+        )
     n_full = m_layers[-1] if convention in ("qian", "midpoint", "stratum") else None
     for i, (layer, n) in enumerate(zip(layers, m_layers)):
-        assert layer.shape == (n, k), f"Layer {i} shape mismatch"
-        assert check_valid_lhd(
-            layer, convention, n_full=n_full
-        ), f"Layer {i} is not a valid LHD"
+        if layer.shape != (n, k):
+            raise ValueError(f"Layer {i} shape mismatch: {layer.shape} != ({n}, {k})")
+        if not check_valid_lhd(layer, convention, n_full=n_full):
+            raise ValueError(f"Layer {i} is not a valid LHD")
     for i in range(len(layers) - 1):
-        if convention == "midpoint":
-            if nesting_check == "exact":
-                assert check_nested(
-                    layers[i], layers[i + 1]
-                ), f"Layer {i} is not a subset of layer {i+1}"
-            else:
-                assert _check_nested_midpoint(
-                    layers[i], layers[i + 1], m_layers[i + 1]
-                ), f"Layer {i} is not a subset of layer {i+1}"
-        elif convention == "stratum":
-            # Stratum: layers are leading rows of full design, exact subset
-            assert check_nested(
-                layers[i], layers[i + 1]
-            ), f"Layer {i} is not a subset of layer {i+1}"
+        if convention == "midpoint" and nesting_check != "exact":
+            if not _check_nested_midpoint(
+                layers[i], layers[i + 1], m_layers[i + 1]
+            ):
+                raise ValueError(f"Layer {i} is not a subset of layer {i+1}")
         else:
-            assert check_nested(
-                layers[i], layers[i + 1]
-            ), f"Layer {i} is not a subset of layer {i+1}"
+            if not check_nested(layers[i], layers[i + 1]):
+                raise ValueError(f"Layer {i} is not a subset of layer {i+1}")

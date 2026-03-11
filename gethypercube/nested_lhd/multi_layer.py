@@ -134,28 +134,6 @@ def extend_to_layer(
     return integer_to_continuous_stratum(X2, n_large, u)
 
 
-def _apply_scramble_midpoint(
-    layers: list[np.ndarray], m_layers: list[int], rng: np.random.Generator
-) -> None:
-    """Deprecated: stratum convention uses single u at conversion; no separate scramble."""
-    pass
-
-
-def _stratum_convert(
-    X_int: np.ndarray,
-    n_L: int,
-    k: int,
-    rng: np.random.Generator,
-    scramble: bool,
-) -> np.ndarray:
-    """Convert full integer design to continuous with (level+u)/n, u drawn once."""
-    if scramble:
-        u = rng.random((n_L, k), dtype=np.float64)
-    else:
-        u = np.full((n_L, k), 0.5, dtype=np.float64)
-    return integer_to_continuous_stratum(X_int, n_L, u)
-
-
 def nested_maximin_lhd(
     k: int,
     m_layers: list[int] | None = None,
@@ -295,7 +273,9 @@ def build_nested_lhd(
         else:
             u = np.full((n, k), 0.5, dtype=np.float64)
         full = integer_to_continuous_stratum(X_int, n, u)
-        return [full]
+        layers = [full]
+        validate_result(layers, m_layers, k, convention="stratum")
+        return layers
 
     validate_m_layers_rennen(m_layers)
     n_1, n_2 = m_layers[0], m_layers[1]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .utils import scale_LH
-from .sliced_lhd import sliced_lhd, compute_phi, lhs_degree, ks_test_uniform
+from .sliced_lhd import sliced_lhd, compute_phi, lhs_degree, ks_test_uniform, is_valid_lhd, is_valid_slhd
 from .nested_lhd import (
     nested_lhd,
     nested_maximin_lhd,
@@ -36,6 +36,8 @@ __all__ = [
     "compute_phi",
     "lhs_degree",
     "ks_test_uniform",
+    "is_valid_lhd",
+    "is_valid_slhd",
     # Nested LHD (Qian / Rennen)
     "nested_lhd",
     "nested_maximin_lhd",

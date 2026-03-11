@@ -89,7 +89,7 @@ class TestValidateResult:
             np.array([[0.0, 0.0], [1.0, 1.0]]),
             np.zeros((4, 2)),  # expected (3, 2)
         ]
-        with pytest.raises(AssertionError, match="shape mismatch"):
+        with pytest.raises(ValueError, match="shape mismatch"):
             validate_result(layers, [2, 3], 2)
 
     def test_invalid_lhd_raises(self):
@@ -97,5 +97,5 @@ class TestValidateResult:
             np.array([[0.0, 0.0], [1.0, 1.0]]),
             np.array([[0.0, 0.0], [0.0, 0.5], [1.0, 1.0]]),  # col0 not perm
         ]
-        with pytest.raises(AssertionError, match="not a valid LHD"):
+        with pytest.raises(ValueError, match="not a valid LHD"):
             validate_result(layers, [2, 3], 2)
