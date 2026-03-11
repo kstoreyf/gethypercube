@@ -1,5 +1,9 @@
 # Nested Latin Hypercube Design — Implementation Specification
 
+> **Note:** This document was written as the original design spec. Some details
+> (grid conventions, parameter names, file layout) evolved during implementation.
+> See the source docstrings and README for the authoritative current API.
+
 Package layout: **gethypercube** with subpackages `gethypercube.sliced_lhd` (maximin SLHD) and `gethypercube.nested_lhd` (Qian + Rennen nested LHD).
 
 ## Overview
@@ -212,12 +216,24 @@ Run GROUPRAND with inner rows **fixed**. Only complement rows participate in POI
 
 ## API Specification
 
+> **Implementation note:** Both functions now use the **stratum convention** for output:
+> integer levels `{0, ..., n-1}` converted to continuous via `(level + u) / n`,
+> where `u ~ Uniform(0, 1)` when `scramble=True` (default) or `u = 0.5` when
+> `scramble=False`. All layers share the same `u`, so inner layers inherit
+> identical jitter from the full design. Output values are in `[0, 1)`.
+>
+> The original Qian (`{1/n, ..., 1}`) and Rennen (`{0, 1/(n-1), ..., 1}`)
+> endpoint conventions described below are the theoretical basis but are not
+> used in the final output.
+
 ```python
 def nested_lhd(
     k: int,
-    m_layers: list[int],
+    m_layers: list[int] | int,
     seed: int | None = None,
-    optimise: bool = False,
+    scramble: bool = True,
+    optimization: str | None = None,
+    n_iter: int | None = None,
 ) -> list[np.ndarray]:
     """
     Construct a multi-layer nested Latin hypercube design using Qian (2009).
@@ -228,56 +244,50 @@ def nested_lhd(
     ----------
     k : int
         Number of dimensions. Must be >= 1.
-    m_layers : list[int]
-        Strictly increasing list of layer sizes [n_1, n_2, ..., n_L].
-        Each n_{i+1} must be an exact multiple of n_i.
-        Minimum 2 layers required.
+    m_layers : list[int] or int
+        Strictly increasing layer sizes; each n_{i+1} must be a multiple of n_i.
+        Minimum 2 layers (if int, treated as single-layer, no nesting).
     seed : int or None
         Random seed for reproducibility.
-    optimise : bool
-        If True, apply a post-hoc complement-only ESE pass to improve
-        space-filling. Default False (pure algebraic construction).
+    scramble : bool
+        If True (default), u ~ Uniform(0, 1) per cell.
+        If False, u = 0.5 (deterministic stratum midpoint).
+    optimization : str or None
+        'cd' — centered-discrepancy hill climbing on complement rows.
+        None (default) — no optimisation.
+    n_iter : int or None
+        Swap budget per complement step when optimization='cd'.
+        None (default) auto-scales with complement size.
 
     Returns
     -------
     list of np.ndarray
-        layers[i] is an m_layers[i] × k float64 array.
-        Levels follow Qian's convention: {1/n, 2/n, ..., 1}.
-        layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1] (row subset relationship).
-        Each layers[i] is a valid LHD.
-
-    Raises
-    ------
-    ValueError
-        If m_layers violates the constraint n_{i+1} % n_i == 0.
+        layers[i] is (m_layers[i], k) float64 in [0, 1).
+        layers[0] ⊂ ... ⊂ layers[L-1] as exact row subsets.
 
     Examples
     --------
-    # Round multiples — the primary use case for this function
-    layers = nested_lhd(k=5, m_layers=[1000, 2000, 4000, 8000])
-
-    layers = nested_lhd(k=3, m_layers=[10, 30, 90])
-    # 30%10==0 ✓, 90%30==0 ✓
-
-    # Will raise ValueError:
-    # nested_lhd(k=3, m_layers=[10, 20, 30])
-    # 30 % 20 = 10 != 0  ✗
+    layers = nested_lhd(k=5, m_layers=[1000, 2000, 4000, 8000], seed=42)
+    layers = nested_lhd(k=3, m_layers=[10, 30, 90], seed=0, optimization='cd')
     """
     ...
 
 
 def nested_maximin_lhd(
     k: int,
-    m_layers: list[int],
+    m_layers: list[int] | None = None,
+    *,
+    m_init: int | None = None,
+    n_layers: int | None = None,
+    ratio: int | None = None,
     n_restarts: int = 5,
     max_outer_iters: int = 200,
     inner_iters_per_point: int = 100,
     seed: int | None = None,
+    scramble: bool = True,
 ) -> list[np.ndarray]:
     """
-    Construct a multi-layer nested maximin Latin hypercube design using
-    Rennen et al. (2010). Maximises the minimum pairwise distance subject
-    to the nested LHD structure.
+    Construct a multi-layer nested maximin LHD (Rennen et al. 2010).
 
     Divisibility constraint: (n_{i+1}-1) % (n_i-1) == 0 for all consecutive pairs.
 
@@ -285,44 +295,33 @@ def nested_maximin_lhd(
     ----------
     k : int
         Number of dimensions. Must be >= 1.
-    m_layers : list[int]
-        Strictly increasing list of layer sizes [n_1, n_2, ..., n_L].
-        Each (n_{i+1} - 1) must be divisible by (n_i - 1).
-        Minimum 2 layers required.
+    m_layers : list[int], optional
+        Strictly increasing layer sizes.
+        If not provided, use m_init/n_layers/ratio instead.
+    m_init, n_layers, ratio : int, optional
+        Alternative: compute m_layers as geometric sequence on (n-1).
     n_restarts : int
-        Number of independent ESE restarts per two-layer step.
-        Best result across restarts is returned. Default 5.
+        ESE restarts per two-layer step. Default 5.
     max_outer_iters : int
-        Maximum outer ESE iterations per restart. Default 200.
+        Max outer ESE iterations. Default 200.
     inner_iters_per_point : int
-        Inner ESE iterations = inner_iters_per_point * n_2 * k. Default 100.
+        Inner iters = this * n_2 * k. Default 100.
     seed : int or None
         Random seed for reproducibility.
+    scramble : bool
+        If True (default), uniform jitter within each stratum.
+        If False, deterministic midpoints.
 
     Returns
     -------
     list of np.ndarray
-        layers[i] is an m_layers[i] × k float64 array.
-        Levels follow Rennen's convention: {0, 1/(n-1), ..., 1}.
-        layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1] (row subset relationship).
-        Each layers[i] is a valid LHD.
-
-    Raises
-    ------
-    ValueError
-        If m_layers violates the constraint (n_{i+1}-1) % (n_i-1) == 0.
+        layers[i] is (m_layers[i], k) float64 in [0, 1).
+        layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1].
 
     Examples
     --------
-    # Ratio-2 sequence (n-1 values double each step)
-    layers = nested_maximin_lhd(k=3, m_layers=[2, 3, 5, 9, 17, 33])
-
-    layers = nested_maximin_lhd(k=5, m_layers=[5, 9, 17])
-    # (9-1)%(5-1)==0 ✓, (17-1)%(9-1)==0 ✓
-
-    # Will raise ValueError:
-    # nested_maximin_lhd(k=3, m_layers=[2, 4, 8, 16])
-    # (8-1)%(4-1) = 7%3 = 1 != 0  ✗
+    layers = nested_maximin_lhd(k=3, m_layers=[2, 3, 5, 9, 17, 33], seed=42)
+    layers = nested_maximin_lhd(k=5, m_init=5, n_layers=4, ratio=2, seed=0)
     """
     ...
 ```
@@ -382,18 +381,17 @@ def validate_m_layers_rennen(m_layers: list[int]) -> None:
 ### Post-construction checks
 
 ```python
-def check_valid_lhd(X: np.ndarray, convention: str = "rennen") -> bool:
+def check_valid_lhd(X: np.ndarray, convention: str = "rennen", ...) -> bool:
     """
     Verify X is a valid LHD.
-    convention="rennen": columns are permutations of {0, 1/(n-1), ..., 1}
-    convention="qian":   columns are permutations of {1/n, 2/n, ..., 1}
-    Check to floating-point tolerance (1e-10).
+    Supports conventions: "rennen", "qian", "midpoint", "stratum".
+    convention="stratum": each column has one value per stratum [k/n, (k+1)/n).
     """
     ...
 
 
 def check_nested(X_inner: np.ndarray, X_outer: np.ndarray, tol: float = 1e-10) -> bool:
-    """Every row of X_inner must appear as a row of X_outer."""
+    """Every row of X_inner must appear as a row of X_outer (O(n) set lookup)."""
     ...
 
 
@@ -401,15 +399,11 @@ def validate_result(
     layers: list[np.ndarray],
     m_layers: list[int],
     k: int,
-    convention: str,
+    convention: str = "rennen",
+    nesting_check: str | None = None,
 ) -> None:
-    assert len(layers) == len(m_layers)
-    for i, (layer, n) in enumerate(zip(layers, m_layers)):
-        assert layer.shape == (n, k), f"Layer {i} shape mismatch"
-        assert check_valid_lhd(layer, convention), f"Layer {i} is not a valid LHD"
-    for i in range(len(layers) - 1):
-        assert check_nested(layers[i], layers[i + 1]), \
-            f"Layer {i} is not a subset of layer {i+1}"
+    """Raises ValueError on first failure (shape, LHD validity, or nesting)."""
+    ...
 ```
 
 ---
@@ -464,34 +458,39 @@ def suggest_valid_layers_rennen(
 ## File Structure
 
 ```
-nested_lhd/
-├── __init__.py              # public exports: nested_lhd, nested_maximin_lhd,
-│                            #   suggest_valid_layers_qian, suggest_valid_layers_rennen
-├── validate.py              # validate_m_layers_qian, validate_m_layers_rennen,
-│                            #   check_valid_lhd, check_nested, validate_result
-├── qian.py                  # nested_lhd — Qian (2009) algebraic construction
-├── ese.py                   # ESE algorithm: GROUPRAND + POINTRAND (shared by both)
-├── rennen.py                # nested_maximin_lhd — Rennen (2010), uses ese.py
-├── utils.py                 # distance computation, grid utilities,
-│                            #   suggest_valid_layers_qian/rennen
-└── tests/
-    ├── test_validate.py     # divisibility checks, error messages for both
-    ├── test_qian.py         # nested_lhd correctness, nesting, LHD validity
-    ├── test_rennen.py       # nested_maximin_lhd correctness, nesting, LHD validity
-    └── test_shared.py       # check_valid_lhd, check_nested, both conventions
+gethypercube/
+├── __init__.py              # top-level public API re-exports
+├── utils.py                 # scale_LH utility
+├── sliced_lhd/
+│   ├── __init__.py
+│   ├── construction.py      # random SLHD construction
+│   ├── design.py            # sliced_lhd — public entry point
+│   ├── objective.py         # phi criterion and incremental update
+│   ├── optimize.py          # simulated annealing
+│   └── utils.py             # lhs_degree, ks_test_uniform, is_valid_lhd, is_valid_slhd
+└── nested_lhd/
+    ├── __init__.py
+    ├── validate.py          # validate_m_layers_*, check_valid_lhd, check_nested, validate_result
+    ├── qian.py              # nested_lhd — Qian (2009) algebraic + optional CD optimisation
+    ├── ese.py               # ESE algorithm: GROUPRAND + POINTRAND
+    ├── multi_layer.py       # nested_maximin_lhd, build_nested_lhd, extend_to_layer
+    ├── two_layer.py         # two_layer_nested_lhd
+    └── utils.py             # grid utilities, suggest_valid_layers_*, m_layers_from_rennen
 ```
 
 ---
 
 ## Implementation Notes
 
-### Grid convention difference in output
+### Grid convention in output
 
-The two functions return coordinates on different scales:
-- `nested_lhd`: values in `(0, 1]`, levels `{1/n, 2/n, ..., 1}`.
-- `nested_maximin_lhd`: values in `[0, 1]`, levels `{0, 1/(n-1), ..., 1}`.
+Both `nested_lhd` and `nested_maximin_lhd` now use the **stratum convention**:
+integer levels `{0, ..., n-1}` converted to continuous via `(level + u) / n`,
+giving values in `[0, 1)`. The jitter `u` is drawn once for the full design and
+shared across all layers, so inner layers inherit identical randomisation.
 
-These are not interchangeable. Document this clearly. If downstream code needs a consistent convention, add a `rescale` utility, but do not silently transform the output.
+(The original Qian `{1/n, ..., 1}` and Rennen `{0, 1/(n-1), ..., 1}` conventions
+from the papers are still described above for reference but are not used in output.)
 
 ### Distance computation (Rennen only)
 
@@ -503,11 +502,14 @@ The scaled separation distance uses `s_j = 1 / (k * (n_j - 1))^(1/k)` from Renne
 
 ### Convergence and computational cost (Rennen only)
 
-For small designs (`n_2 <= 50`, `k <= 5`) ESE typically converges within 50–100 outer iterations. For `n > 100` increase `n_restarts` to 10 or more. For `n > 500` Rennen's approach becomes computationally expensive and `nested_lhd(optimise=True)` is the better choice.
+For small designs (`n_2 <= 50`, `k <= 5`) ESE typically converges within 50–100 outer iterations. For `n > 100` increase `n_restarts` to 10 or more. For `n > 500` Rennen's approach becomes computationally expensive and `nested_lhd(optimization='cd')` is the better choice.
 
 ### Seeding
 
-Both functions accept `seed`. Pass to `np.random.default_rng(seed)` and derive per-restart child seeds via `rng.integers(0, 2**31)`.
+Both functions accept `seed`. Pass to `np.random.default_rng(seed)`. For SA restarts,
+child seeds are derived via `np.random.SeedSequence(seed).spawn(nstarts)`. For CD
+optimisation in `nested_lhd`, a separate RNG is spawned so that scramble jitter is
+identical regardless of whether optimisation is enabled.
 
 ---
 
@@ -521,7 +523,7 @@ n values can be flexible?
     → nested_maximin_lhd (Rennen) for best space-filling
 
 n > 500 and space-filling still matters?
-    → nested_lhd(optimise=True)
+    → nested_lhd(optimization='cd')
 
 Unsure which sizes are valid?
     → call suggest_valid_layers_qian() or suggest_valid_layers_rennen() first

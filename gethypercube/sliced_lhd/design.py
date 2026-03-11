@@ -13,7 +13,7 @@ _VALID_OPTIMIZATIONS = frozenset({"sa"})
 def _standardize(
     D: np.ndarray, n: int, scramble: bool, rng: np.random.Generator
 ) -> np.ndarray:
-    """Convert integer design (1-indexed) to continuous [0, 1]."""
+    """Convert integer design (1-indexed) to continuous [0, 1)."""
     Df = D.astype(float)
     if scramble:
         result = np.empty_like(Df)
@@ -43,7 +43,8 @@ def sliced_lhd(
     Generate a Sliced Latin Hypercube Design (SLHD).
 
     The full design (n = m * t points) and every individual slice (m points)
-    are each valid LHDs.  When t=1, produces a standard maximin-distance LHD.
+    are each valid LHDs.  When t=1, produces a standard LHD (use
+    optimization='sa' for maximin space-filling).
 
     Parameters
     ----------
@@ -54,9 +55,9 @@ def sliced_lhd(
     k : int
         Number of input dimensions (>= 1).
     optimization : {'sa'} or None
-        None (default) — random construction, no optimisation.
-        'sa' — simulated annealing on the maximin distance criterion
-               phi_r(X) (Ba et al. 2015).
+        ``None`` (default) — random construction, no optimisation.
+        ``'sa'`` — simulated annealing on the maximin distance criterion
+        phi_r(X) (Ba et al. 2015).
     power : int
         Exponent r in the average reciprocal-distance criterion (default 15).
         Higher values approximate true maximin more closely.
@@ -73,14 +74,15 @@ def sliced_lhd(
     seed : int or None
         Random seed for reproducibility.
     scramble : bool
-        True (default) — uniform jitter within each stratum (like SciPy LHS).
-        False — stratum midpoints: (rank - 0.5) / n.
+        If True (default), uniform jitter within each stratum, giving values
+        in [0, 1).  If False, stratum midpoints (rank - 0.5) / n, giving
+        values in (0, 1).
 
     Returns
     -------
     list[np.ndarray]
-        List of t arrays each of shape (m, k), continuous in [0, 1]^k.
-        Slice i is slices[i].  Full design: np.vstack(slices).
+        List of t arrays each of shape (m, k), with values in [0, 1).
+        Slice i is ``slices[i]``.  Full design: ``np.vstack(slices)``.
     """
     if t < 1 or m < 2 or k < 1:
         raise ValueError("Require t >= 1, m >= 2, k >= 1")

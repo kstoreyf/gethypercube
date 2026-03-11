@@ -1,4 +1,4 @@
-"""Distance calculations, grid utilities, and suggest_valid_layers for nested LHD."""
+"""Grid utilities, coordinate conversions, and suggest_valid_layers for nested LHD."""
 
 from __future__ import annotations
 

@@ -77,7 +77,7 @@ def run_sa(
 
     Parameters
     ----------
-    t, m, k, r, itermax, total_iter : see maximinSLHD docstring
+    t, m, k, r, itermax, total_iter : see sliced_lhd docstring.
     rng : np.random.Generator
 
     Returns

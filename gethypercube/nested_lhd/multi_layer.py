@@ -81,13 +81,13 @@ def extend_to_layer(
     """
     Extend an existing inner-layer design to a larger nested layer.
 
-    Given X_inner (n_small × k) float in [0, 1], build X_outer (n_large × k)
+    Given X_inner (n_small × k) float in [0, 1), build X_outer (n_large × k)
     such that the first n_small rows of X_outer are X_inner re-mapped to the
     n_large-grid, and X_outer is a valid LHD. Uses ESE to maximise space-filling.
 
     Parameters
     ----------
-    X_inner : np.ndarray, shape (n_small, k), float in [0, 1]
+    X_inner : np.ndarray, shape (n_small, k), float in [0, 1)
         Valid LHD on n_small-grid (e.g. from a previous layer).
     n_large : int
         Target outer layer size. (n_large - 1) must be divisible by (n_small - 1).
@@ -100,7 +100,7 @@ def extend_to_layer(
 
     Returns
     -------
-    X_outer : np.ndarray, shape (n_large, k), float64 in [0, 1]
+    X_outer : np.ndarray, shape (n_large, k), float64 in [0, 1)
     """
     n_small = X_inner.shape[0]
     c = (n_large - 1) // (n_small - 1)
@@ -151,8 +151,6 @@ def nested_maximin_lhd(
     Construct a multi-layer nested maximin LHD (Rennen et al. 2010).
 
     Divisibility: (n_{i+1}-1) % (n_i-1) == 0 for all consecutive pairs.
-    Levels (stratum convention): integer levels 0..n-1, convert (level+u)/n with u drawn
-    once for the full design; strata [k/n, (k+1)/n) tile [0, 1) symmetrically.
 
     Parameters
     ----------
@@ -176,17 +174,22 @@ def nested_maximin_lhd(
     inner_iters_per_point : int
         Inner iters = this * n_2 * k. Default 100.
     seed : int or None
-        Random seed.
+        Random seed for reproducibility.
     scramble : bool
-        If True (default), randomly place values within each LHD cell (as in
-        scipy.stats.qmc.LatinHypercube(scramble=True)). If False, keep grid-aligned
-        values.
+        If True (default), uniform jitter within each stratum, giving values
+        in [0, 1).  If False, stratum midpoints (level + 0.5) / n.
 
     Returns
     -------
     list of np.ndarray
-        layers[i] is (m_layers[i], k) float64 in [0, 1), stratum convention.
+        layers[i] is (m_layers[i], k) float64 in [0, 1).
         layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1].
+
+    Raises
+    ------
+    ValueError
+        If m_layers violates the Rennen divisibility constraint, or neither
+        m_layers nor all of (m_init, n_layers, ratio) are provided.
     """
     if m_layers is None:
         if m_init is None or n_layers is None or ratio is None:
@@ -214,17 +217,20 @@ def build_nested_lhd(
     scramble: bool = True,
 ) -> list[np.ndarray]:
     """
-    Construct a multi-layer nested Latin hypercube design.
+    Construct a multi-layer nested maximin LHD (Rennen et al. 2010).
+
+    Uses ESE (Enhanced Stochastic Evolutionary) optimisation for space-filling.
+    Divisibility: (n_{i+1}-1) % (n_i-1) == 0 for all consecutive pairs.
 
     Parameters
     ----------
     k : int
         Number of dimensions. Must be >= 1.
-    m_layers : list[int]
+    m_layers : list[int] or int
         Strictly increasing list of layer sizes [n_1, n_2, ..., n_L].
         Must satisfy: for all consecutive pairs (n_i, n_{i+1}),
         (n_{i+1} - 1) must be divisible by (n_i - 1).
-        Minimum 2 layers required.
+        If int, treated as a single-layer design (no nesting).
     n_restarts : int
         Number of independent ESE restarts per two-layer optimisation step.
         The best result across restarts is returned.
@@ -234,32 +240,29 @@ def build_nested_lhd(
         Number of inner ESE iterations = inner_iters_per_point * n_2 * k.
     seed : int or None
         Random seed for reproducibility.
-
     scramble : bool
-        If True (default), randomly place values within each LHD cell (as in
-        scipy.stats.qmc.LatinHypercube(scramble=True)). If False, keep grid-aligned
-        values.
+        If True (default), uniform jitter within each stratum, giving values
+        in [0, 1).  If False, stratum midpoints (level + 0.5) / n.
 
     Returns
     -------
     list of np.ndarray
         layers[i] is an m_layers[i] × k float64 array with values in [0, 1).
         layers[0] ⊂ layers[1] ⊂ ... ⊂ layers[L-1] (row subset relationship).
-        Stratum convention: one value per stratum [k/n_i, (k+1)/n_i), u drawn once.
 
     Raises
     ------
     ValueError
         If m_layers is not strictly increasing, has fewer than 2 elements,
-        or violates the divisibility constraint.
+        or violates the Rennen divisibility constraint.
 
     Examples
     --------
-    >>> layers = build_nested_lhd(k=3, m_layers=[2, 4, 8, 16], seed=42)
+    >>> layers = build_nested_lhd(k=3, m_layers=[2, 3, 5, 9], seed=42)
     >>> len(layers)
     4
     >>> layers[0].shape, layers[-1].shape
-    ((2, 3), (16, 3))
+    ((2, 3), (9, 3))
     """
     if isinstance(m_layers, int):
         m_layers = [m_layers]
